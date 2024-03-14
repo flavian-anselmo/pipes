@@ -1,6 +1,8 @@
 use std::process::{Command, exit};
 use std::io::{Write, Read};
 use std::fs::{File, remove_file};
+use std::os::unix::io::{AsRawFd, RawFd};
+use libc::{flock, LOCK_EX, LOCK_NB};
 
 const FIFO_PATH: &str = "/tmp/my_fifo";
 
@@ -11,17 +13,38 @@ fn create_fifo() -> std::io::Result<()> {
     }
 }
 
+fn acquire_lock(fd: RawFd) -> std::io::Result<()> {
+    let res = unsafe { flock(fd, LOCK_EX | LOCK_NB) };
+    if res == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn release_lock(fd: RawFd) -> std::io::Result<()> {
+    let res = unsafe { flock(fd, libc::LOCK_UN) };
+    if res == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 fn parent_process() {
-    // Open the FIFO for writing
-    let mut fifo = File::create(FIFO_PATH).expect("Unable to open FIFO for writing");
+    let fifo = File::open(FIFO_PATH).expect("Unable to open FIFO for writing");
+    let fd = fifo.as_raw_fd();
+    
+    acquire_lock(fd).expect("Failed to acquire lock");
 
     // Write data to the FIFO
+    let mut fifo = File::create(FIFO_PATH).expect("Unable to open FIFO for writing");
     let message = "child process!";
     fifo.write_all(message.as_bytes()).expect("Error writing to FIFO");
 
     println!("Parent process sent message: {}", message);
 
-    drop(fifo);
+    release_lock(fd).expect("Failed to release lock");
 
     let status = Command::new("echo")
         .arg("Parent process completed.")
@@ -34,6 +57,11 @@ fn parent_process() {
 }
 
 fn child_process() {
+    let fifo = File::open(FIFO_PATH).expect("Unable to open FIFO for reading");
+    let fd = fifo.as_raw_fd();
+    
+    acquire_lock(fd).expect("Failed to acquire lock");
+
     let mut fifo = File::open(FIFO_PATH).expect("Unable to open FIFO for reading");
 
     let mut buffer = String::new();
@@ -41,7 +69,7 @@ fn child_process() {
 
     println!("Child process received message: {}", buffer);
 
-    drop(fifo);
+    release_lock(fd).expect("Failed to release lock");
 
     remove_file(FIFO_PATH).expect("Unable to remove FIFO");
 }
